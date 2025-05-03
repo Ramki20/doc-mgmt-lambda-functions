@@ -1,10 +1,9 @@
 // File: index.js
 const { 
-  S3Client, 
+  S3Client,
   PutObjectCommand, 
   GetObjectCommand, 
-  ListObjectsV2Command, 
-  HeadObjectCommand 
+  ListObjectsV2Command
 } = require('@aws-sdk/client-s3');
 
 // Initialize the S3 client
@@ -12,7 +11,7 @@ const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' })
 const BUCKET_NAME = process.env.BUCKET_NAME;
 const ALLOWED_EXTENSIONS = ['.docx', '.pdf', '.jpg', '.png', '.jpeg', '.txt', '.xlsx'];
 
-// Enhanced CORS headers function for Lambda
+// Enhanced CORS headers function
 function getCorsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*', // For production, use your specific domain
@@ -38,33 +37,41 @@ exports.handler = async (event) => {
         headers,
         body: JSON.stringify({ message: 'Preflight request successful' }),
       };
-    }    
+    }
     
     // Parse the request body if it exists
     let body = {};
+    let fileContent = null;
+    
     if (event.body) {
       try {
         // Check if the body is base64 encoded (binary data)
         if (event.isBase64Encoded) {
-          // For binary uploads, we'll handle them in the uploadFile function
-          body = { action: 'uploadFile' };
+          const decodedBody = Buffer.from(event.body, 'base64');
+          
+          // For file uploads, extract the file content
+          if (event.queryStringParameters && event.queryStringParameters.action === 'uploadFile') {
+            fileContent = decodedBody;
+          }
         } else {
           // For JSON requests
           body = JSON.parse(event.body);
         }
       } catch (error) {
         console.error('Error parsing request body:', error);
-        // If we can't parse as JSON and it's not marked as base64, assume it's a direct file upload
-        body = { action: 'uploadFile' };
+        // If not JSON, assume form-data or direct file upload
+        if (event.queryStringParameters && event.queryStringParameters.action === 'uploadFile') {
+          fileContent = event.body;
+        }
       }
     }
     
-    // Route based on the action parameter
-    const action = event.queryStringParameters?.action || body.action;
+    // Route based on the action parameter from query string
+    const action = event.queryStringParameters?.action;
     
     switch (action) {
       case 'uploadFile':
-        return await uploadFile(event, headers);
+        return await uploadFile(event, headers, fileContent);
       case 'listDocuments':
         return await listDocuments(headers);
       case 'downloadFile':
@@ -87,15 +94,9 @@ exports.handler = async (event) => {
 };
 
 // Direct file upload to S3
-async function uploadFile(event, headers) {
-  if (!event.isBase64Encoded || !event.body) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'Invalid file upload request' }),
-    };
-  }
-
+async function uploadFile(event, headers, fileContent) {
+  console.log('Processing file upload request');
+  
   // Get file info from query parameters
   const fileName = event.queryStringParameters?.fileName;
   const contentType = event.queryStringParameters?.contentType || 'application/octet-stream';
@@ -121,11 +122,29 @@ async function uploadFile(event, headers) {
     };
   }
 
-  // Decode base64 file data
-  const fileBuffer = Buffer.from(event.body, 'base64');
+  // Prepare file content
+  let fileBuffer;
+  if (fileContent) {
+    if (typeof fileContent === 'string') {
+      fileBuffer = Buffer.from(fileContent);
+    } else {
+      fileBuffer = fileContent;
+    }
+  } else if (event.isBase64Encoded && event.body) {
+    fileBuffer = Buffer.from(event.body, 'base64');
+  } else {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'No file content found' }),
+    };
+  }
   
   // Create a unique key for the file
   const key = `documents/${Date.now()}-${fileName}`;
+  
+  // Log details for debugging
+  console.log(`Uploading file: ${fileName}, Content-Type: ${contentType}, Size: ${fileBuffer.length} bytes`);
   
   // Upload file directly to S3
   const uploadParams = {
@@ -139,6 +158,8 @@ async function uploadFile(event, headers) {
     const command = new PutObjectCommand(uploadParams);
     await s3Client.send(command);
     
+    console.log(`File uploaded successfully to ${key}`);
+    
     return {
       statusCode: 200,
       headers,
@@ -149,7 +170,7 @@ async function uploadFile(event, headers) {
       }),
     };
   } catch (error) {
-    console.error('Error uploading file:', error);
+    console.error('Error uploading file to S3:', error);
     return {
       statusCode: 500,
       headers,
