@@ -5,6 +5,7 @@ const {
   GetObjectCommand, 
   ListObjectsV2Command
 } = require('@aws-sdk/client-s3');
+const busboy = require('busboy');
 
 // Initialize the S3 client
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -20,6 +21,72 @@ function getCorsHeaders() {
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400', // 24 hours
   };
+}
+
+// Function to parse multipart form data
+async function parseMultipartForm(event) {
+  return new Promise((resolve, reject) => {
+    // Check if content-type header exists
+    const contentType = event.headers['content-type'] || event.headers['Content-Type'];
+    if (!contentType || !contentType.includes('multipart/form-data')) {
+      return reject(new Error('Not a multipart/form-data request'));
+    }
+    
+    const bb = busboy({ 
+      headers: event.headers,
+      limits: {
+        fileSize: 10 * 1024 * 1024 // 10MB limit
+      }
+    });
+    
+    let fileData = null;
+    let fileName = '';
+    let fileType = '';
+    
+    bb.on('file', (fieldname, file, info) => {
+      const { filename, encoding, mimeType } = info;
+      console.log(`Processing file: ${filename}, type: ${mimeType}`);
+      
+      fileName = filename;
+      fileType = mimeType;
+      
+      const chunks = [];
+      file.on('data', (data) => {
+        chunks.push(data);
+      });
+      
+      file.on('end', () => {
+        fileData = Buffer.concat(chunks);
+        console.log(`File ${filename} read complete: ${fileData.length} bytes`);
+      });
+    });
+    
+    bb.on('finish', () => {
+      if (!fileData) {
+        return reject(new Error('No file found in form data'));
+      }
+      
+      resolve({
+        fileData,
+        fileName,
+        fileType
+      });
+    });
+    
+    bb.on('error', (error) => {
+      console.error('Error parsing multipart form:', error);
+      reject(error);
+    });
+    
+    // Pass the base64-decoded body to busboy if it's base64 encoded
+    if (event.isBase64Encoded) {
+      bb.write(Buffer.from(event.body, 'base64'));
+    } else {
+      bb.write(Buffer.from(event.body));
+    }
+    
+    bb.end();
+  });
 }
 
 // Main handler to route requests based on action
@@ -39,39 +106,12 @@ exports.handler = async (event) => {
       };
     }
     
-    // Parse the request body if it exists
-    let body = {};
-    let fileContent = null;
-    
-    if (event.body) {
-      try {
-        // Check if the body is base64 encoded (binary data)
-        if (event.isBase64Encoded) {
-          const decodedBody = Buffer.from(event.body, 'base64');
-          
-          // For file uploads, extract the file content
-          if (event.queryStringParameters && event.queryStringParameters.action === 'uploadFile') {
-            fileContent = decodedBody;
-          }
-        } else {
-          // For JSON requests
-          body = JSON.parse(event.body);
-        }
-      } catch (error) {
-        console.error('Error parsing request body:', error);
-        // If not JSON, assume form-data or direct file upload
-        if (event.queryStringParameters && event.queryStringParameters.action === 'uploadFile') {
-          fileContent = event.body;
-        }
-      }
-    }
-    
     // Route based on the action parameter from query string
     const action = event.queryStringParameters?.action;
     
     switch (action) {
       case 'uploadFile':
-        return await uploadFile(event, headers, fileContent);
+        return await uploadFile(event, headers);
       case 'listDocuments':
         return await listDocuments(headers);
       case 'downloadFile':
@@ -93,68 +133,49 @@ exports.handler = async (event) => {
   }
 };
 
-// Direct file upload to S3
-async function uploadFile(event, headers, fileContent) {
+// Updated file upload to S3 with multipart form parsing
+async function uploadFile(event, headers) {
   console.log('Processing file upload request');
   
-  // Get file info from query parameters
-  const fileName = event.queryStringParameters?.fileName;
-  const contentType = event.queryStringParameters?.contentType || 'application/octet-stream';
-  
-  if (!fileName) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'File name is required' }),
-    };
-  }
-  
-  // Validate file extension
-  const fileExtension = `.${fileName.split('.').pop().toLowerCase()}`;
-  if (!ALLOWED_EXTENSIONS.includes(fileExtension)) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ 
-        error: 'Invalid file type', 
-        message: `Supported file types: ${ALLOWED_EXTENSIONS.join(', ')}` 
-      }),
-    };
-  }
-
-  // Prepare file content
-  let fileBuffer;
-  if (fileContent) {
-    if (typeof fileContent === 'string') {
-      fileBuffer = Buffer.from(fileContent);
-    } else {
-      fileBuffer = fileContent;
-    }
-  } else if (event.isBase64Encoded && event.body) {
-    fileBuffer = Buffer.from(event.body, 'base64');
-  } else {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'No file content found' }),
-    };
-  }
-  
-  // Create a unique key for the file
-  const key = `documents/${Date.now()}-${fileName}`;
-  
-  // Log details for debugging
-  console.log(`Uploading file: ${fileName}, Content-Type: ${contentType}, Size: ${fileBuffer.length} bytes`);
-  
-  // Upload file directly to S3
-  const uploadParams = {
-    Bucket: BUCKET_NAME,
-    Key: key,
-    Body: fileBuffer,
-    ContentType: contentType
-  };
-  
   try {
+    // Parse the multipart form data
+    const { fileData, fileName, fileType } = await parseMultipartForm(event);
+    
+    if (!fileName) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'File name is required' }),
+      };
+    }
+    
+    // Validate file extension
+    const fileExtension = `.${fileName.split('.').pop().toLowerCase()}`;
+    if (!ALLOWED_EXTENSIONS.includes(fileExtension)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ 
+          error: 'Invalid file type', 
+          message: `Supported file types: ${ALLOWED_EXTENSIONS.join(', ')}` 
+        }),
+      };
+    }
+    
+    // Create a unique key for the file
+    const key = `documents/${Date.now()}-${fileName}`;
+    
+    // Log details for debugging
+    console.log(`Uploading file: ${fileName}, Content-Type: ${fileType}, Size: ${fileData.length} bytes`);
+    
+    // Upload file directly to S3
+    const uploadParams = {
+      Bucket: BUCKET_NAME,
+      Key: key,
+      Body: fileData,
+      ContentType: fileType
+    };
+    
     const command = new PutObjectCommand(uploadParams);
     await s3Client.send(command);
     
