@@ -23,76 +23,99 @@ function getCorsHeaders() {
   };
 }
 
-// Function to parse multipart form data
-async function parseMultipartForm(event) {
+// Simple function to extract file from multipart form data
+async function extractFileFromForm(event) {
   return new Promise((resolve, reject) => {
-    // Check if content-type header exists
-    const contentType = event.headers['content-type'] || event.headers['Content-Type'];
-    if (!contentType || !contentType.includes('multipart/form-data')) {
-      return reject(new Error('Not a multipart/form-data request'));
-    }
-    
-    const bb = busboy({ 
-      headers: event.headers,
-      limits: {
-        fileSize: 10 * 1024 * 1024 // 10MB limit
-      }
-    });
-    
-    let fileData = null;
-    let fileName = '';
-    let fileType = '';
-    
-    bb.on('file', (fieldname, file, info) => {
-      const { filename, encoding, mimeType } = info;
-      console.log(`Processing file: ${filename}, type: ${mimeType}`);
+    try {
+      // Get content type from headers
+      const contentType = event.headers['content-type'] || event.headers['Content-Type'];
       
-      fileName = filename;
-      fileType = mimeType;
-      
-      const chunks = [];
-      file.on('data', (data) => {
-        chunks.push(data);
-      });
-      
-      file.on('end', () => {
-        fileData = Buffer.concat(chunks);
-        console.log(`File ${filename} read complete: ${fileData.length} bytes`);
-      });
-    });
-    
-    bb.on('finish', () => {
-      if (!fileData) {
-        return reject(new Error('No file found in form data'));
+      // Verify we have multipart/form-data
+      if (!contentType || !contentType.includes('multipart/form-data')) {
+        console.log('Not a multipart/form-data request:', contentType);
+        return reject(new Error('Not a multipart/form-data request'));
       }
       
-      resolve({
-        fileData,
-        fileName,
-        fileType
+      console.log('Processing multipart/form-data with content type:', contentType);
+      
+      // Set up busboy to parse the multipart form
+      const bb = busboy({ headers: { 'content-type': contentType } });
+      
+      let fileData = null;
+      let fileName = '';
+      let fileType = '';
+      
+      // Handle file parts
+      bb.on('file', (fieldname, file, info) => {
+        const { filename, encoding, mimeType } = info;
+        console.log(`Found file in form: ${filename}, type: ${mimeType}`);
+        
+        fileName = filename;
+        fileType = mimeType;
+        
+        // Collect file data chunks
+        const chunks = [];
+        file.on('data', (data) => {
+          chunks.push(data);
+        });
+        
+        file.on('end', () => {
+          fileData = Buffer.concat(chunks);
+          console.log(`File data collected: ${fileData.length} bytes`);
+        });
       });
-    });
-    
-    bb.on('error', (error) => {
-      console.error('Error parsing multipart form:', error);
+      
+      // Handle completion
+      bb.on('finish', () => {
+        if (!fileData) {
+          return reject(new Error('No file found in form data'));
+        }
+        
+        resolve({
+          fileData,
+          fileName,
+          fileType
+        });
+      });
+      
+      // Handle parsing errors
+      bb.on('error', (error) => {
+        console.error('Error parsing form data:', error);
+        reject(error);
+      });
+      
+      // Process the request body
+      if (event.isBase64Encoded) {
+        // Decode base64 encoded body
+        const decodedBody = Buffer.from(event.body, 'base64');
+        bb.write(decodedBody);
+      } else {
+        // Use body directly if not encoded
+        bb.write(Buffer.from(event.body));
+      }
+      
+      bb.end();
+    } catch (error) {
+      console.error('Exception processing form data:', error);
       reject(error);
-    });
-    
-    // Pass the base64-decoded body to busboy if it's base64 encoded
-    if (event.isBase64Encoded) {
-      bb.write(Buffer.from(event.body, 'base64'));
-    } else {
-      bb.write(Buffer.from(event.body));
     }
-    
-    bb.end();
   });
 }
 
 // Main handler to route requests based on action
 exports.handler = async (event) => {
   try {
-    console.log('Received event:', JSON.stringify(event, null, 2));
+    console.log('Received event:', JSON.stringify({
+      httpMethod: event.httpMethod,
+      path: event.path,
+      queryStringParameters: event.queryStringParameters,
+      headers: {
+        'content-type': event.headers['content-type'] || event.headers['Content-Type']
+      },
+      isBase64Encoded: event.isBase64Encoded,
+      bodyLength: event.body ? event.body.length : 0
+    }));
+    
     // Get CORS headers
     const headers = getCorsHeaders();
     
@@ -133,21 +156,13 @@ exports.handler = async (event) => {
   }
 };
 
-// Updated file upload to S3 with multipart form parsing
+// File upload with proper multipart form parsing
 async function uploadFile(event, headers) {
   console.log('Processing file upload request');
   
   try {
-    // Parse the multipart form data
-    const { fileData, fileName, fileType } = await parseMultipartForm(event);
-    
-    if (!fileName) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({ error: 'File name is required' }),
-      };
-    }
+    // Extract file from multipart form
+    const { fileData, fileName, fileType } = await extractFileFromForm(event);
     
     // Validate file extension
     const fileExtension = `.${fileName.split('.').pop().toLowerCase()}`;
@@ -162,18 +177,44 @@ async function uploadFile(event, headers) {
       };
     }
     
+    // Determine final content type
+    let contentType = fileType;
+    
+    // Override content type for well-known extensions
+    switch (fileExtension.toLowerCase()) {
+      case '.pdf':
+        contentType = 'application/pdf';
+        break;
+      case '.docx':
+        contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        break;
+      case '.xlsx':
+        contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        break;
+      case '.txt':
+        contentType = 'text/plain';
+        break;
+      case '.jpg':
+      case '.jpeg':
+        contentType = 'image/jpeg';
+        break;
+      case '.png':
+        contentType = 'image/png';
+        break;
+    }
+    
     // Create a unique key for the file
     const key = `documents/${Date.now()}-${fileName}`;
     
-    // Log details for debugging
-    console.log(`Uploading file: ${fileName}, Content-Type: ${fileType}, Size: ${fileData.length} bytes`);
+    // Log upload details
+    console.log(`Uploading file: ${fileName}, Content-Type: ${contentType}, Size: ${fileData.length} bytes`);
     
-    // Upload file directly to S3
+    // Upload to S3
     const uploadParams = {
       Bucket: BUCKET_NAME,
       Key: key,
       Body: fileData,
-      ContentType: fileType
+      ContentType: contentType
     };
     
     const command = new PutObjectCommand(uploadParams);
@@ -253,31 +294,8 @@ async function downloadFile(event, headers) {
     // Extract file name from key
     const fileName = key.split('/').pop();
     
-    // Set content type based on file extension
-    const extension = fileName.split('.').pop().toLowerCase();
-    let contentType = 'application/octet-stream'; // Default
-    
-    switch (extension) {
-      case 'pdf':
-        contentType = 'application/pdf';
-        break;
-      case 'docx':
-        contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        break;
-      case 'xlsx':
-        contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-        break;
-      case 'txt':
-        contentType = 'text/plain';
-        break;
-      case 'jpg':
-      case 'jpeg':
-        contentType = 'image/jpeg';
-        break;
-      case 'png':
-        contentType = 'image/png';
-        break;
-    }
+    // Get content type from S3
+    const contentType = response.ContentType || 'application/octet-stream';
     
     // Convert the readable stream to buffer
     const fileStream = response.Body;
@@ -288,13 +306,14 @@ async function downloadFile(event, headers) {
     }
     
     const fileBuffer = Buffer.concat(chunks);
+    console.log(`Downloaded file: ${fileName}, Size: ${fileBuffer.length} bytes, Type: ${contentType}`);
     
     // Set response headers for file download
     const downloadHeaders = {
       ...headers,
       'Content-Type': contentType,
       'Content-Disposition': `attachment; filename="${fileName}"`,
-      'Content-Encoding': 'identity'
+      'Content-Length': fileBuffer.length.toString()
     };
     
     // Return file content directly, base64 encoded
