@@ -229,17 +229,6 @@ async function downloadFile(event, headers) {
     
     const response = await s3Client.send(command);
     
-    // Convert the readable stream to buffer
-    const fileStream = response.Body;
-    const chunks = [];
-    
-    for await (const chunk of fileStream) {
-      chunks.push(chunk);
-    }
-    
-    const fileBuffer = Buffer.concat(chunks);
-    const base64File = fileBuffer.toString('base64');
-    
     // Extract file name from key
     const fileName = key.split('/').pop();
     
@@ -269,17 +258,29 @@ async function downloadFile(event, headers) {
         break;
     }
     
+    // Convert the readable stream to buffer
+    const fileStream = response.Body;
+    const chunks = [];
+    
+    for await (const chunk of fileStream) {
+      chunks.push(chunk);
+    }
+    
+    const fileBuffer = Buffer.concat(chunks);
+    
     // Set response headers for file download
     const downloadHeaders = {
       ...headers,
       'Content-Type': contentType,
       'Content-Disposition': `attachment; filename="${fileName}"`,
+      'Content-Encoding': 'identity'
     };
     
+    // Return file content directly, base64 encoded
     return {
       statusCode: 200,
       headers: downloadHeaders,
-      body: base64File,
+      body: fileBuffer.toString('base64'),
       isBase64Encoded: true
     };
   } catch (error) {
