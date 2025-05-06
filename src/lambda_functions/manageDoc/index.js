@@ -308,21 +308,43 @@ async function downloadFile(event, headers) {
     const fileBuffer = Buffer.concat(chunks);
     console.log(`Downloaded file: ${fileName}, Size: ${fileBuffer.length} bytes, Type: ${contentType}`);
     
-    // Set response headers for file download
-    const downloadHeaders = {
-      ...headers,
-      'Content-Type': contentType,
-      'Content-Disposition': `attachment; filename="${fileName}"`,
-      'Content-Length': fileBuffer.length.toString()
-    };
+    // Check if we need to handle this file differently based on content type
+    const isTextPlainFile = contentType === 'text/plain';
     
-    // Return file content directly, base64 encoded
-    return {
-      statusCode: 200,
-      headers: downloadHeaders,
-      body: fileBuffer.toString('base64'),
-      isBase64Encoded: true
-    };
+    if (isTextPlainFile) {
+      // For text/plain files, we'll handle differently since it's not in binary media types
+      // Return as JSON with the file content
+      return {
+        statusCode: 200,
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileName,
+          contentType,
+          fileContent: fileBuffer.toString('base64'),
+          isBase64Encoded: true
+        })
+      };
+    } else {
+      // For binary files, return as before
+      // Set response headers for file download
+      const downloadHeaders = {
+        ...headers,
+        'Content-Type': contentType,
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Content-Length': fileBuffer.length.toString()
+      };
+      
+      // Return file content directly, base64 encoded
+      return {
+        statusCode: 200,
+        headers: downloadHeaders,
+        body: fileBuffer.toString('base64'),
+        isBase64Encoded: true
+      };
+    }
   } catch (error) {
     console.error('Error downloading file:', error);
     
