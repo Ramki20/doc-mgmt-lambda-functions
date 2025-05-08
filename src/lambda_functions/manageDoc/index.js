@@ -45,21 +45,20 @@ async function extractFileFromForm(event) {
       let fileName = '';
       let fileType = '';
       
-      // Handle file parts
-      bb.on('file', (fieldname, file, info) => {
-        const { filename, encoding, mimeType } = info;
-        console.log(`Found file in form: ${filename}, type: ${mimeType}`);
+      // Handle file parts - the file handler signature is different in @fastify/busboy
+      bb.on('file', (fieldname, fileStream, filename, encoding, mimetype) => {
+        console.log(`Found file in form: ${filename}, type: ${mimetype}`);
         
         fileName = filename;
-        fileType = mimeType;
+        fileType = mimetype;
         
         // Collect file data chunks
         const chunks = [];
-        file.on('data', (data) => {
+        fileStream.on('data', (data) => {
           chunks.push(data);
         });
         
-        file.on('end', () => {
+        fileStream.on('end', () => {
           fileData = Buffer.concat(chunks);
           console.log(`File data collected: ${fileData.length} bytes`);
         });
