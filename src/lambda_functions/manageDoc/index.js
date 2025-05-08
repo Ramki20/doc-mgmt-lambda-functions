@@ -5,7 +5,7 @@ const {
   GetObjectCommand, 
   ListObjectsV2Command
 } = require('@aws-sdk/client-s3');
-const busboy = require('busboy');
+const Busboy = require('@fastify/busboy');
 
 // Initialize the S3 client
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -39,7 +39,7 @@ async function extractFileFromForm(event) {
       console.log('Processing multipart/form-data with content type:', contentType);
       
       // Set up busboy to parse the multipart form
-      const bb = busboy({ headers: { 'content-type': contentType } });
+      const bb = new Busboy({ headers: { 'content-type': contentType } });
       
       let fileData = null;
       let fileName = '';
