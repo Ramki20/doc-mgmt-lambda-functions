@@ -23,7 +23,7 @@ function getCorsHeaders() {
   };
 }
 
-// Simple function to extract file from multipart form data
+// Simple function to extract file and field data from multipart form data
 async function extractFileFromForm(event) {
   return new Promise((resolve, reject) => {
     try {
@@ -45,7 +45,13 @@ async function extractFileFromForm(event) {
       let fileName = '';
       let fileType = '';
       
-      // Handle file parts - the file handler signature is different in @fastify/busboy
+      // Initialize object to store form fields
+      const formFields = {
+        documentValueCode: '',
+        documentValueTypeCode: ''
+      };
+      
+      // Handle file parts
       bb.on('file', (fieldname, fileStream, filename, encoding, mimetype) => {
         console.log(`Found file in form: ${filename}, type: ${mimetype}`);
         
@@ -64,6 +70,18 @@ async function extractFileFromForm(event) {
         });
       });
       
+      // Handle text fields
+      bb.on('field', (fieldname, val) => {
+        console.log(`Form field: ${fieldname} = ${val}`);
+        
+        // Save specific fields we're interested in
+        if (fieldname === 'documentValueCode') {
+          formFields.documentValueCode = val;
+        } else if (fieldname === 'documentValueTypeCode') {
+          formFields.documentValueTypeCode = val;
+        }
+      });
+      
       // Handle completion
       bb.on('finish', () => {
         if (!fileData) {
@@ -73,7 +91,9 @@ async function extractFileFromForm(event) {
         resolve({
           fileData,
           fileName,
-          fileType
+          fileType,
+          documentValueCode: formFields.documentValueCode,
+          documentValueTypeCode: formFields.documentValueTypeCode
         });
       });
       
@@ -161,7 +181,16 @@ async function uploadFile(event, headers) {
   
   try {
     // Extract file from multipart form
-    const { fileData, fileName, fileType } = await extractFileFromForm(event);
+    const { 
+      fileData, 
+      fileName, 
+      fileType, 
+      documentValueCode,
+      documentValueTypeCode
+    } = await extractFileFromForm(event);
+    
+    // Log the form field values
+    console.log(`Form fields - documentValueCode: ${documentValueCode}, documentValueTypeCode: ${documentValueTypeCode}`);
     
     // Validate file extension
     const fileExtension = `.${fileName.split('.').pop().toLowerCase()}`;
@@ -208,18 +237,25 @@ async function uploadFile(event, headers) {
     // Log upload details
     console.log(`Uploading file: ${fileName}, Content-Type: ${contentType}, Size: ${fileData.length} bytes`);
     
+    // Include metadata with the document codes
+    const metadata = {
+      documentValueCode: documentValueCode || 'NA',
+      documentValueTypeCode: documentValueTypeCode || 'NA'
+    };
+    
     // Upload to S3
     const uploadParams = {
       Bucket: BUCKET_NAME,
       Key: key,
       Body: fileData,
-      ContentType: contentType
+      ContentType: contentType,
+      Metadata: metadata  // Include the form field values as metadata
     };
     
     const command = new PutObjectCommand(uploadParams);
     await s3Client.send(command);
     
-    console.log(`File uploaded successfully to ${key}`);
+    console.log(`File uploaded successfully to ${key} with metadata`);
     
     return {
       statusCode: 200,
@@ -227,7 +263,9 @@ async function uploadFile(event, headers) {
       body: JSON.stringify({
         message: 'File uploaded successfully',
         key,
-        fileName
+        fileName,
+        documentValueCode,
+        documentValueTypeCode
       }),
     };
   } catch (error) {
@@ -296,6 +334,10 @@ async function downloadFile(event, headers) {
     // Get content type from S3
     const contentType = response.ContentType || 'application/octet-stream';
     
+    // Get metadata if available
+    const metadata = response.Metadata || {};
+    console.log('Document metadata:', metadata);
+    
     // Convert the readable stream to buffer
     const fileStream = response.Body;
     const chunks = [];
@@ -323,7 +365,8 @@ async function downloadFile(event, headers) {
           fileName,
           contentType,
           fileContent: fileBuffer.toString('base64'),
-          isBase64Encoded: true
+          isBase64Encoded: true,
+          metadata  // Include the metadata in the response
         })
       };
     } else {
@@ -333,7 +376,10 @@ async function downloadFile(event, headers) {
         ...headers,
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${fileName}"`,
-        'Content-Length': fileBuffer.length.toString()
+        'Content-Length': fileBuffer.length.toString(),
+        // Add metadata as custom headers
+        'X-Document-Value-Code': metadata.documentvaluecode || 'NA',
+        'X-Document-Value-Type-Code': metadata.documentvaluetypecode || 'NA'
       };
       
       // Return file content directly, base64 encoded
